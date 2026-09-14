@@ -247,7 +247,7 @@ def build_embeds(run_id, lead, articles):
 
 
 def send(run_id, lead, articles, webhook=None, dry_run=True):
-    payload = {"username": "편집실", "embeds": build_embeds(run_id, lead, articles)}
+    payload = {"username": "MJ K", "embeds": build_embeds(run_id, lead, articles)}
     if dry_run or not webhook:
         print(f"[dry-run] embed {len(payload['embeds'])}개 · "
               f"{len(json.dumps(payload, ensure_ascii=False))}자 — 보내지 않음")
