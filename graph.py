@@ -13,6 +13,7 @@ from typing import Annotated, TypedDict
 import feedparser
 import requests
 import trafilatura
+import yaml
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Send
@@ -92,10 +93,27 @@ class Shortlist(BaseModel):
 
 BATCH, TARGET = 40, 5
 
-CRITERIA = ("독자는 AI를 실제 제품에 붙이는 국내 개발팀입니다.\n"
-            "- 이번 주 일하는 방식이 바뀔 만한가\n"
-            "- 지금 쓰는 도구·API의 가격·한도·정책이 실제로 변했나\n"
-            "버릴 것: 발표 예정·로드맵만 있는 것, MOU·투자유치·수상 같은 홍보성 소식")
+# ── 섹션 13: 설정 파일(audience.yaml)에서 독자·기준을 읽어온다 ───────────
+_CFG_PATH = pathlib.Path("audience.yaml")
+if not _CFG_PATH.exists():
+    raise FileNotFoundError(
+        "audience.yaml이 없습니다. 설정 없이 기본값으로 도는 건 조용한 실패이므로 "
+        "파일을 만들어야만 실행되게 한다."
+    )
+CFG = yaml.safe_load(_CFG_PATH.read_text(encoding="utf-8"))
+
+
+def build_criteria(cfg):
+    out = [f"독자는 {cfg['독자']['누구']}입니다.",
+           f"이미 아는 것: {cfg['독자']['이미_아는_것']}",
+           "", "중요도 기준 (위에 있을수록 우선):"]
+    out += [f"- {x}" for x in cfg["중요도_기준"]]
+    out += ["", "버릴 것:"]
+    out += [f"- {x}" for x in cfg["버릴_것"]]
+    return "\n".join(out)
+
+
+CRITERIA = build_criteria(CFG)
 
 
 def ask_picks(items, n):
@@ -130,7 +148,7 @@ class Draft(BaseModel):
     why:      str = Field(description="국내 개발팀에게 왜 중요한지 한 문장")
 
 
-SYS_DRAFT = ("당신은 국내 개발팀을 위한 AI 뉴스레터 기자입니다.\n"
+SYS_DRAFT = (f"당신은 {CFG['독자']['누구']}를 위한 AI 뉴스레터 기자입니다.\n"
              "아래 기사 본문을 읽고 헤드라인·요약·왜 중요한지를 쓰세요.\n"
              "반드시 한국어로 쓰세요.\n"
              "'주목된다·기대를 모은다' 같은 기자체 표현은 쓰지 마세요.")
