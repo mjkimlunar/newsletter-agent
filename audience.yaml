@@ -1,3 +1,16 @@
+# 소스: 이름/url 쌍. 이 목록이 곧 수집 노드의 SOURCES가 된다.
+소스:
+  - 이름: "OpenAI"
+    url: "https://openai.com/blog/rss.xml"
+  - 이름: "DeepMind"
+    url: "https://deepmind.google/blog/rss.xml"
+  - 이름: "TechCrunch"
+    url: "https://techcrunch.com/category/artificial-intelligence/feed/"
+  - 이름: "The Verge"
+    url: "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml"
+  - 이름: "AI타임스"
+    url: "https://www.aitimes.com/rss/allArticle.xml"
+
 독자:
   누구: "AI를 실제 제품에 붙이는 국내 개발팀 — 개발자와 기획자"
   이미_아는_것: "LLM API 사용법, 프롬프트 기본, RAG 개념"

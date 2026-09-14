@@ -1,0 +1,30 @@
+# 소스: 이름/url 쌍. 이 목록이 곧 수집 노드의 SOURCES가 된다.
+소스:
+  - 이름: "The Hacker News"
+    url: "https://feeds.feedburner.com/TheHackersNews"
+  - 이름: "BleepingComputer"
+    url: "https://www.bleepingcomputer.com/feed/"
+  - 이름: "Krebs on Security"
+    url: "https://krebsonsecurity.com/feed/"
+  - 이름: "Dark Reading"
+    url: "https://www.darkreading.com/rss.xml"
+
+독자:
+  누구: "사내 인프라·서비스를 운영하는 개발팀 및 보안 담당자"
+  이미_아는_것: "CVE, 취약점 스캐닝, 기본적인 네트워크 보안 개념"
+
+# 본선 프롬프트에 그대로 들어간다. 위에 있을수록 우선.
+# 기사 하나를 보고 예/아니오로 답할 수 있는 질문이어야 한다.
+중요도_기준:
+  - "실제로 악용(active exploitation) 중이거나 PoC가 공개된 취약점인가"
+  - "널리 쓰이는 소프트웨어·라이브러리·클라우드 서비스에 영향을 주는가"
+  - "지금 당장 패치·설정 변경 등 조치가 필요한가"
+
+# 추상어("홍보성") 말고 구체적인 표현으로.
+버릴_것:
+  - "보안 업체의 신제품 홍보, 컨퍼런스·행사 소식"
+  - "실사용 익스플로잇 없는 순수 이론적 취약점 논문"
+
+# 취재(요약) 프롬프트에 추가로 덧붙는 지침. 선택 항목.
+작성지침:
+  - "가능하면 영향받는 제품/버전, CVE 번호, 조치 방법을 요약에 구체적으로 포함할 것"

@@ -26,6 +26,17 @@ client = OpenAI()
 UA = {"User-Agent": "Mozilla/5.0 (newsletter-agent-course)"}
 MODEL = "gpt-4.1-mini"
 
+# ── 섹션 13: 설정 파일에서 소스·독자·기준을 읽어온다 ───────────────────
+# AUDIENCE_CONFIG 환경변수로 어느 설정 파일을 쓸지 정한다 — 코드는 하나,
+# 설정만 바꿔서 다른 주제(AI/보안 등)의 뉴스레터를 돌린다.
+_CFG_PATH = pathlib.Path(os.environ.get("AUDIENCE_CONFIG", "audience.yaml"))
+if not _CFG_PATH.exists():
+    raise FileNotFoundError(
+        f"{_CFG_PATH}이 없습니다. 설정 없이 기본값으로 도는 건 조용한 실패이므로 "
+        "파일을 만들어야만 실행되게 한다."
+    )
+CFG = yaml.safe_load(_CFG_PATH.read_text(encoding="utf-8"))
+
 
 # ── State ────────────────────────────────────────────────────────────
 class Brief(TypedDict):
@@ -37,14 +48,15 @@ class Brief(TypedDict):
     log:       Annotated[list, operator.add]
 
 
-# ── ① 수집 ───────────────────────────────────────────────────────────
-SOURCES = [
+# ── ① 수집 — 소스도 설정 파일에서 (없으면 기본 AI 소스로 대체) ───────────
+_DEFAULT_SOURCES = [
     ("OpenAI",     "https://openai.com/blog/rss.xml"),
     ("DeepMind",   "https://deepmind.google/blog/rss.xml"),
     ("TechCrunch", "https://techcrunch.com/category/artificial-intelligence/feed/"),
     ("The Verge",  "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml"),
     ("AI타임스",    "https://www.aitimes.com/rss/allArticle.xml"),
 ]
+SOURCES = [(s["이름"], s["url"]) for s in CFG["소스"]] if "소스" in CFG else _DEFAULT_SOURCES
 
 
 def strip_tags(s):
@@ -93,15 +105,6 @@ class Shortlist(BaseModel):
 
 BATCH, TARGET = 40, 5
 
-# ── 섹션 13: 설정 파일(audience.yaml)에서 독자·기준을 읽어온다 ───────────
-_CFG_PATH = pathlib.Path("audience.yaml")
-if not _CFG_PATH.exists():
-    raise FileNotFoundError(
-        "audience.yaml이 없습니다. 설정 없이 기본값으로 도는 건 조용한 실패이므로 "
-        "파일을 만들어야만 실행되게 한다."
-    )
-CFG = yaml.safe_load(_CFG_PATH.read_text(encoding="utf-8"))
-
 
 def build_criteria(cfg):
     out = [f"독자는 {cfg['독자']['누구']}입니다.",
@@ -148,9 +151,12 @@ class Draft(BaseModel):
     why:      str = Field(description="국내 개발팀에게 왜 중요한지 한 문장")
 
 
-SYS_DRAFT = (f"당신은 {CFG['독자']['누구']}를 위한 AI 뉴스레터 기자입니다.\n"
+# '작성지침'은 선택 항목 — 없으면 일반 지시만 쓴다 (섹션 13: 설정과 코드의 경계)
+_EXTRA_GUIDE = "\n".join(f"- {x}" for x in CFG.get("작성지침", []))
+SYS_DRAFT = (f"당신은 {CFG['독자']['누구']}를 위한 뉴스레터 기자입니다.\n"
              "아래 기사 본문을 읽고 헤드라인·요약·왜 중요한지를 쓰세요.\n"
-             "반드시 한국어로 쓰세요.\n"
+             + (f"{_EXTRA_GUIDE}\n" if _EXTRA_GUIDE else "")
+             + "반드시 한국어로 쓰세요.\n"
              "'주목된다·기대를 모은다' 같은 기자체 표현은 쓰지 마세요.")
 
 
@@ -312,7 +318,7 @@ def run():
            "log":       out["log"]}
     for a in out["verified"]:
         row["by_source"][a["source"]] = row["by_source"].get(a["source"], 0) + 1
-    path = pathlib.Path("store/metrics.jsonl")
+    path = pathlib.Path(f"store/metrics_{_CFG_PATH.stem}.jsonl")
     path.parent.mkdir(exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
