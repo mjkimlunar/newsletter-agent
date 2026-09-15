@@ -6,8 +6,8 @@
     url: "https://www.bleepingcomputer.com/feed/"
   - 이름: "Krebs on Security"
     url: "https://krebsonsecurity.com/feed/"
-  - 이름: "Dark Reading"
-    url: "https://www.darkreading.com/rss.xml"
+  - 이름: "SecurityWeek"
+    url: "https://www.securityweek.com/feed/"
 
 독자:
   누구: "사내 인프라·서비스를 운영하는 개발팀 및 보안 담당자"
