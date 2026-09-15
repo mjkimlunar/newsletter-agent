@@ -135,13 +135,42 @@ def select(s: dict) -> dict:
     items = s["collected"]
     if not items:
         return {"picked": [], "log": ["② 선별   0 → 0건"]}
-    survivors = []
+
+    survivors = []          # [(item, event), ...] — event는 예선에서 붙은 사건 라벨
     for i in range(0, len(items), BATCH):
         chunk = items[i:i + BATCH]
-        survivors += [chunk[p.index] for p in ask_picks(chunk, min(8, len(chunk)))]
-    finals = ask_picks(survivors, TARGET) if survivors else []
-    return {"picked": [survivors[p.index] for p in finals],
-            "log": [f"② 선별   {len(items)} → 예선 {len(survivors)} → {len(finals)}건"]}
+        survivors += [(chunk[p.index], p.event) for p in ask_picks(chunk, min(8, len(chunk)))]
+
+    if not survivors:
+        return {"picked": [], "log": [f"② 선별   {len(items)} → 예선 0 → 0건"]}
+
+    survivor_items = [it for it, _ in survivors]
+    finals = ask_picks(survivor_items, TARGET)
+
+    # 본선이 고른 순서를 지키되, '같은 사건은 하나만'이라는 프롬프트 부탁이
+    # 지켜지지 않은 경우(같은 event 중복)를 코드로 걸러낸다.
+    picked, seen_events, dropped_dupes = [], set(), 0
+    for p in finals:
+        event = survivors[p.index][1]
+        if event in seen_events:
+            dropped_dupes += 1
+            continue
+        picked.append(survivors[p.index][0])
+        seen_events.add(event)
+
+    # 중복 제거로 모자란 자리는, 본선에 안 뽑혔던 예선 통과분 중 새 event로 백필한다.
+    final_idx = {p.index for p in finals}
+    for i, (it, event) in enumerate(survivors):
+        if len(picked) >= TARGET:
+            break
+        if i in final_idx or event in seen_events:
+            continue
+        picked.append(it)
+        seen_events.add(event)
+
+    log_suffix = f" · 중복 event {dropped_dupes}건 제거·백필" if dropped_dupes else ""
+    return {"picked": picked[:TARGET],
+            "log": [f"② 선별   {len(items)} → 예선 {len(survivors)} → {len(picked[:TARGET])}건{log_suffix}"]}
 
 
 # ── ③ 취재 ───────────────────────────────────────────────────────────
