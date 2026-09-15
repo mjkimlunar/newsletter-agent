@@ -40,16 +40,19 @@ CVE, 취약점 스캐닝, 기본적인 네트워크 보안 개념은 이미 알�
 과제에서 요구한 "최소 3개 이상" 조건과 별개로, 후보 8곳을 동일 조건(48시간 창, RSS 응답 여부,
 최신 항목 중 최대 5건에 대한 `trafilatura` 본문 추출 성공률·평균 길이)으로 실측했다.
 
-| 소스 | RSS 응답 | 48h 내 항목 | 본문 추출(G1) | 평균 본문 길이 | 채택 여부 |
+| 소스 | RSS 피드 URL | 48h 내 항목 | 본문 추출(G1) | 평균 본문 길이 | 채택 여부 |
 |---|---|---|---|---|---|
-| The Hacker News | OK | 9 | 5/5 | 5,669자 | ✅ 채택 |
-| BleepingComputer | OK | 13 | 5/5 | 3,893자 | ✅ 채택 |
-| SecurityWeek | OK | 10 | 5/5 | 4,353자 | ✅ 채택 |
-| Krebs on Security | OK | 0 | 5/5 (과거 항목 기준) | 21,571자 | ✅ 채택 |
-| Dark Reading | OK | 3 | **0/3** | 0자 | ❌ 탈락 |
-| The Record | OK | 5 | 5/5 | 3,519자 | ❌ 보류 |
-| SANS ISC | OK | 2 | 1/2 | 42,770자 | ❌ 탈락 |
-| Threatpost | OK | 0 | 5/5 (과거 항목 기준) | 3,779자 | ❌ 탈락 |
+| The Hacker News | `feeds.feedburner.com/TheHackersNews` | 9 | 5/5 | 5,669자 | ✅ 채택 |
+| BleepingComputer | `www.bleepingcomputer.com/feed/` | 13 | 5/5 | 3,893자 | ✅ 채택 |
+| SecurityWeek | `www.securityweek.com/feed/` | 10 | 5/5 | 4,353자 | ✅ 채택 |
+| Krebs on Security | `krebsonsecurity.com/feed/` | 0 | 5/5 (과거 항목 기준) | 21,571자 | ✅ 채택 |
+| Dark Reading | `www.darkreading.com/rss.xml` | 3 | **0/3** | 0자 | ❌ 탈락 |
+| The Record | `therecord.media/feed` | 5 | 5/5 | 3,519자 | ❌ 보류 |
+| SANS ISC | `isc.sans.edu/rssfeed_full.xml` | 2 | 1/2 | 42,770자 | ❌ 탈락 |
+| Threatpost | `threatpost.com/feed/` | 0 | 5/5 (과거 항목 기준) | 3,779자 | ❌ 탈락 |
+
+(전부 RSS 응답 자체는 정상 — "RSS 응답" 열은 생략하고 URL로 대체했다. 실제 채택된
+4곳의 URL은 `audience_security.yaml`의 `소스` 목록과 그대로 일치한다.)
 
 **탈락/보류 근거**:
 
