@@ -9,6 +9,9 @@
 - 실행: `AUDIENCE_CONFIG=audience_security.yaml python run.py [--dry-run]`
 - 자동 실행: `.github/workflows/security.yml` (매일 07:40 KST)
 - 지표: `store/metrics_audience_security.jsonl`
+- 발행 채널: 기본은 Discord, `PUBLISH_CHANNEL=email`로 전환하면 같은 파이프라인이
+  이메일로 발행한다 (6번 항목 참고) — 그래프 조립·수집·선별·요약·검수는 채널과
+  무관하게 그대로다.
 
 ---
 
@@ -252,7 +255,53 @@ end-to-end로 완료됐다. 원본 데이터는 `store/metrics_audience_security
 
 ---
 
-## 6. 프로젝트 회고
+## 6. 다른 발행 채널 지원 (이메일)
+
+과제 안내에서 "LangGraph를 꼭 안 써도 되고, 발행 채널도 Discord 외에 이메일·텔레그램·
+카카오 오픈톡 등 자유롭게 선택 가능"이라는 안내가 있어, 실제로 발행 채널을 바꿔도
+파이프라인의 나머지가 코드 변경 없이 재사용되는지 검증해봤다.
+
+**구현**: `_build_articles()`로 "검수 통과 기사에서 무엇을 보낼지"를 채널과 무관하게
+공통으로 뽑아내고, Discord용 `publish()`와 이메일용 `publish_email()`(`build_email_html()`
++ `send_email()`, `smtplib` 사용)이 이 결과를 각자의 포맷으로만 바꿔서 보낸다.
+`build()`는 `PUBLISH_CHANNEL` 환경변수 값으로 그래프에 꽂을 발행 노드만 바꿔 끼운다 —
+`collect`·`select`·`report`·`verify` 네 노드와 그래프 모양은 한 글자도 건드리지 않는다.
+
+```python
+publish_node = publish_email if os.environ.get("PUBLISH_CHANNEL") == "email" else publish
+```
+
+**실행 결과 (같은 실행 데이터, 채널만 다름, dry-run)**:
+
+```
+# 기본값(Discord)
+[dry-run] embed 5개 · 3860자 — 보내지 않음
+① 수집   24시간 창 · 29건
+② 선별   29 → 예선 8 → 5건
+④ 검수   5 → 4건 · 불합격 ['BleepingComputer']
+⑤ 발행(Discord)   4건 · dry-run
+
+# PUBLISH_CHANNEL=email
+[dry-run] 이메일 · 제목='[보안 브리핑] 2026-09-15 — 5건' · 수신자='(미설정)' · 본문 4846자 — 보내지 않음
+① 수집   24시간 창 · 29건
+② 선별   29 → 예선 8 → 5건
+④ 검수   5 → 5건
+⑤ 발행(이메일)   5건 · dry-run
+```
+
+①~④ 단계는 완전히 동일한 코드 경로를 지나고(수치가 다른 건 검수가 실행마다
+독립적으로 판단하기 때문), ⑤만 노드가 교체된다. `SMTP_HOST`/`SMTP_USER`/`SMTP_PASS`/
+`MAIL_TO`를 설정하면 실제 발송도 가능하지만, 이번 제출에서는 구조와 dry-run 동작만
+검증했다 — 실제 메일 발송은 별도의 SMTP 계정 준비가 필요해 범위 밖으로 남겨둔다.
+
+부수적으로, 이 작업을 하며 Discord 임베드 제목이 주제와 무관하게 "AI 브리핑"으로
+하드코딩되어 있던 것도 발견해 `audience.yaml`/`audience_security.yaml`의 `브리핑명`
+값에서 가져오도록 고쳤다 (`BRIEF_NAME = CFG.get("브리핑명", "브리핑")`) — 이전
+스크린샷(5번 항목)에 남아있는 "AI 브리핑"이라는 제목이 바로 이 버그의 증거다.
+
+---
+
+## 7. 프로젝트 회고
 
 **가장 공들인 부분**: "프롬프트에 적은 부탁은 확률적으로만 지켜진다"는 걸 실제
 운영에서 세 번 직접 겪고 코드로 보강한 것.

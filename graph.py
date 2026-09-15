@@ -36,6 +36,7 @@ if not _CFG_PATH.exists():
         "파일을 만들어야만 실행되게 한다."
     )
 CFG = yaml.safe_load(_CFG_PATH.read_text(encoding="utf-8"))
+BRIEF_NAME = CFG.get("브리핑명", "브리핑")
 
 
 # ── State ────────────────────────────────────────────────────────────
@@ -266,7 +267,7 @@ def build_embeds(run_id, lead, articles):
     if not articles:
         return [{"title": f"🗞️ {run_id}", "color": DEFAULT_COLOR,
                  "description": "오늘은 조용합니다."}]
-    embeds = [{"title": f"🗞️ {run_id} · AI 브리핑", "description": lead, "color": DEFAULT_COLOR}]
+    embeds = [{"title": f"🗞️ {run_id} · {BRIEF_NAME}", "description": lead, "color": DEFAULT_COLOR}]
     for i, a in enumerate(articles, 1):
         desc = a["summary"]
         if a.get("why"):
@@ -304,26 +305,99 @@ def make_lead(arts):
     return f"오늘은 {len(arts)}건을 골랐습니다. ({srcs})"
 
 
-def publish(s: dict) -> dict:
-    arts = [{"headline": a["headline"], "summary": a["summary"], "why": a["why"],
+def _build_articles(s: dict) -> list:
+    """검수를 통과한 기사만, 발행에 필요한 칸만 골라 새 딕셔너리로 만든다.
+    Discord든 이메일이든 '무엇을 보낼지'는 똑같으므로 두 발행 노드가 공유한다."""
+    return [{"headline": a["headline"], "summary": a["summary"], "why": a["why"],
              "url": a["url"], "source": a["source"], "topic": a.get("event", ""),
              "when": a["at"].strftime("%m-%d %H:%M")} for a in s["verified"]]
+
+
+def publish(s: dict) -> dict:
+    """발행 ⑤-A: Discord"""
+    arts = _build_articles(s)
     today = datetime.now().strftime("%Y-%m-%d")
     sent = send(today, make_lead(arts), arts,
                 webhook=os.environ.get("DISCORD_WEBHOOK_URL"),
                 dry_run=os.environ.get("DRY_RUN", "1") == "1")
     label = f"{len(arts)}건" if arts else "조용합니다"
-    return {"log": [f"⑤ 발행   {label} · {'보냄' if sent else 'dry-run'}"]}
+    return {"log": [f"⑤ 발행(Discord)   {label} · {'보냄' if sent else 'dry-run'}"]}
+
+
+# ── ⑤-B 발행: 이메일 (다른 매체로도 발행 가능함을 보여주는 대안 경로) ─────
+def build_email_html(run_id, lead, articles):
+    """Discord의 build_embeds()와 정확히 대응하는 이메일용 HTML 버전."""
+    if not articles:
+        return f"<h2>🗞️ {run_id}</h2><p>오늘은 조용합니다.</p>"
+    parts = [f"<h2>🗞️ {run_id} · {BRIEF_NAME}</h2>", f"<p>{lead}</p>", "<hr>"]
+    for i, a in enumerate(articles, 1):
+        parts.append(
+            f"<h3>{i}. <a href='{a['url']}'>{a['headline']}</a></h3>"
+            f"<p>{a['summary']}</p>"
+            + (f"<p>💡 <b>{a['why']}</b></p>" if a.get("why") else "")
+            + f"<p style='color:#888;font-size:12px'>{a['source']} · {a['when']}</p>"
+            "<hr>"
+        )
+    return "\n".join(parts)
+
+
+def send_email(subject, html_body, dry_run=True):
+    """SMTP로 이메일을 보낸다. 사내 SMTP 릴레이도 host/port만 바꾸면 그대로 쓸 수 있다."""
+    to_addr = os.environ.get("MAIL_TO", "")
+    if dry_run or not to_addr:
+        print(f"[dry-run] 이메일 · 제목='{subject}' · 수신자='{to_addr or '(미설정)'}' "
+              f"· 본문 {len(html_body)}자 — 보내지 않음")
+        return False
+
+    import smtplib
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+
+    host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+    port = int(os.environ.get("SMTP_PORT", "465"))
+    user = os.environ.get("SMTP_USER", "")
+    pw = os.environ.get("SMTP_PASS", "")
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = user
+    msg["To"] = to_addr
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+    try:
+        with smtplib.SMTP_SSL(host, port, timeout=20) as server:
+            server.login(user, pw)
+            server.sendmail(user, [to_addr], msg.as_string())
+        print("발행(이메일): 성공")
+        return True
+    except Exception as e:
+        print(f"발행(이메일): 실패 {type(e).__name__}: {e}")
+        return False
+
+
+def publish_email(s: dict) -> dict:
+    """발행 ⑤-B: 이메일. collect·select·report·verify는 한 글자도 안 건드린다 —
+    발행 채널을 바꿀 때 고치는 건 이 노드 하나뿐이다."""
+    arts = _build_articles(s)
+    today = datetime.now().strftime("%Y-%m-%d")
+    subject = f"[{BRIEF_NAME}] {today} — {len(arts)}건" if arts else f"[{BRIEF_NAME}] {today} — 오늘은 조용합니다"
+    html = build_email_html(today, make_lead(arts), arts)
+    sent = send_email(subject, html, dry_run=os.environ.get("DRY_RUN", "1") == "1")
+    label = f"{len(arts)}건" if arts else "조용합니다"
+    return {"log": [f"⑤ 발행(이메일)   {label} · {'보냄' if sent else 'dry-run'}"]}
 
 
 # ── 그래프 조립 ──────────────────────────────────────────────────────
 def build():
+    # PUBLISH_CHANNEL 환경변수로 발행 노드만 갈아 끼운다. 그래프 모양은 그대로.
+    publish_node = publish_email if os.environ.get("PUBLISH_CHANNEL") == "email" else publish
+
     g = StateGraph(Brief)
     g.add_node("collect", collect)
     g.add_node("select", select)
     g.add_node("report", report)
     g.add_node("verify", verify)
-    g.add_node("publish", publish)
+    g.add_node("publish", publish_node)
 
     g.add_edge(START, "collect")
     g.add_edge("collect", "select")
