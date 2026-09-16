@@ -2,6 +2,7 @@
 뉴스레터 에이전트 — 수집부터 발행까지
 State 다섯 칸, 노드 다섯 개, build(), run(). import 만 해서는 아무 일도 일어나지 않는다.
 """
+import html
 import json
 import operator
 import os
@@ -25,6 +26,9 @@ load_dotenv()  # 로컬에 .env가 있으면 읽고, 없어도(Actions) 에러 �
 client = OpenAI()
 UA = {"User-Agent": "Mozilla/5.0 (newsletter-agent-course)"}
 MODEL = "gpt-4.1-mini"
+BODY_CHARS = 6000  # draft()·check() 둘 다 이 길이로 자른 본문을 봐야 한다 (동료 리뷰 2026-09-16:
+                   # draft는 6000자, check는 5000자를 써서 5001~6000자 구간의 사실이
+                   # "원문에 없음"으로 오판될 수 있었다)
 
 # ── 섹션 13: 설정 파일에서 소스·독자·기준을 읽어온다 ───────────────────
 # AUDIENCE_CONFIG 환경변수로 어느 설정 파일을 쓸지 정한다 — 코드는 하나,
@@ -41,12 +45,13 @@ BRIEF_NAME = CFG.get("브리핑명", "브리핑")
 
 # ── State ────────────────────────────────────────────────────────────
 class Brief(TypedDict):
-    hours:     int
-    collected: list
-    picked:    list
-    drafted:   Annotated[list, operator.add]
-    verified:  list
-    log:       Annotated[list, operator.add]
+    hours:       int
+    collected:   list
+    picked:      list
+    drafted:     Annotated[list, operator.add]
+    verified:    list
+    sent_status: str   # "dry-run" / "sent" / "failed" — publish 노드가 채운다
+    log:         Annotated[list, operator.add]
 
 
 # ── ① 수집 — 소스도 설정 파일에서 (없으면 기본 AI 소스로 대체) ───────────
@@ -74,7 +79,9 @@ def collect(s: dict) -> dict:
     items, dead, seen = [], [], set()
     for name, url in SOURCES:
         try:
-            feed = feedparser.parse(requests.get(url, headers=UA, timeout=20).content)
+            resp = requests.get(url, headers=UA, timeout=20)
+            resp.raise_for_status()  # 403/404/5xx 등을 "0건"이 아니라 dead로 잡는다
+            feed = feedparser.parse(resp.content)
         except Exception:
             dead.append(name)
             continue
@@ -124,12 +131,50 @@ def ask_picks(items, n):
     listing = "\n".join(f"{i}. [{it['source']}] {it['title']}" for i, it in enumerate(items))
     sys_msg = (f"{CRITERIA}\n\n아래 목록에서 중요한 순서대로 {n}건을 고르세요.\n"
                "같은 사건을 다룬 기사에는 같은 event 라벨을 붙이세요.")
-    out = client.chat.completions.parse(
-        model=MODEL, temperature=0,
-        messages=[{"role": "system", "content": sys_msg},
-                  {"role": "user", "content": listing}],
-        response_format=Shortlist).choices[0].message.parsed
+    try:
+        out = client.chat.completions.parse(
+            model=MODEL, temperature=0,
+            messages=[{"role": "system", "content": sys_msg},
+                      {"role": "user", "content": listing}],
+            response_format=Shortlist).choices[0].message.parsed
+    except Exception:
+        out = None
+    # 호출이 실패하거나(네트워크 오류) 모델이 구조화 출력을 거부하면(.parsed가 None)
+    # 이 배치는 "고른 게 0건"으로 취급한다 — 여기서 죽으면 다른 배치·전체 실행이 멈춘다.
+    if out is None:
+        return []
     return [p for p in out.picks if 0 <= p.index < len(items)]
+
+
+class EventLabel(BaseModel):
+    index: int
+    event: str
+
+
+class EventLabels(BaseModel):
+    labels: list[EventLabel]
+
+
+def relabel_events(items):
+    """예선이 여러 배치로 나뉘면 event 라벨이 배치마다 따로 붙는다 — 같은 사건이
+    배치만 다르면 서로 다른 문자열 라벨을 받아 select()의 중복 제거를 피해 간다
+    (동료 리뷰 2026-09-16). 생존자 전체를 한 화면에 다시 놓고 라벨을 통일한다."""
+    listing = "\n".join(f"{i}. [{it['source']}] {it['title']}" for i, it in enumerate(items))
+    sys_msg = ("아래는 여러 묶음에서 따로 뽑힌 기사 목록입니다. 같은 사건을 다루는 "
+               "기사끼리 같은 event 라벨을 붙이고, 사건이 다르면 다른 라벨을 붙이세요. "
+               "모든 번호에 라벨을 답하세요.")
+    try:
+        out = client.chat.completions.parse(
+            model=MODEL, temperature=0,
+            messages=[{"role": "system", "content": sys_msg},
+                      {"role": "user", "content": listing}],
+            response_format=EventLabels).choices[0].message.parsed
+    except Exception:
+        out = None
+    if out is None:
+        return None
+    by_index = {l.index: l.event for l in out.labels}
+    return [by_index.get(i) for i in range(len(items))]
 
 
 def select(s: dict) -> dict:
@@ -146,6 +191,16 @@ def select(s: dict) -> dict:
         return {"picked": [], "log": [f"② 선별   {len(items)} → 예선 0 → 0건"]}
 
     survivor_items = [it for it, _ in survivors]
+
+    # 예선이 배치 두 개 이상으로 나뉘었을 때만 라벨을 다시 통일한다 (배치가 하나면
+    # 애초에 전부 같은 화면에서 라벨이 붙었으므로 다시 물을 필요가 없다).
+    relabel_note = ""
+    if len(items) > BATCH:
+        relabeled = relabel_events(survivor_items)
+        if relabeled:
+            survivors = [(it, relabeled[i] or ev) for i, (it, ev) in enumerate(survivors)]
+            relabel_note = " · event 재통일"
+
     finals = ask_picks(survivor_items, TARGET)
 
     # 본선이 고른 순서를 지키되, '같은 사건은 하나만'이라는 프롬프트 부탁이
@@ -169,7 +224,7 @@ def select(s: dict) -> dict:
         picked.append(it)
         seen_events.add(event)
 
-    log_suffix = f" · 중복 event {dropped_dupes}건 제거·백필" if dropped_dupes else ""
+    log_suffix = (f" · 중복 event {dropped_dupes}건 제거·백필" if dropped_dupes else "") + relabel_note
     return {"picked": picked[:TARGET],
             "log": [f"② 선별   {len(items)} → 예선 {len(survivors)} → {len(picked[:TARGET])}건{log_suffix}"]}
 
@@ -200,11 +255,14 @@ def extract_body(url):
 
 
 def draft(body):
-    return client.chat.completions.parse(
-        model=MODEL, temperature=0,
-        messages=[{"role": "system", "content": SYS_DRAFT},
-                  {"role": "user", "content": body[:6000]}],
-        response_format=Draft).choices[0].message.parsed
+    try:
+        return client.chat.completions.parse(
+            model=MODEL, temperature=0,
+            messages=[{"role": "system", "content": SYS_DRAFT},
+                      {"role": "user", "content": body[:BODY_CHARS]}],
+            response_format=Draft).choices[0].message.parsed
+    except Exception:
+        return None
 
 
 def fan_report(s: dict):
@@ -220,7 +278,13 @@ def report(s: ReportIn) -> dict:
         return {"drafted": [],
                 "log": [f"   취재 제외 {it['source']} · 본문 {len(body or '')}자"]}
     d = draft(body)
-    return {"drafted": [{**it, "body": body[:6000], **d.model_dump()}]}
+    if d is None:
+        # 이 기사 하나의 요약 호출이 실패해도(네트워크 오류·모델 거부) 나머지
+        # Send 워커·전체 실행은 계속돼야 한다 — report는 병렬로 fan-out되므로
+        # 여기서 예외가 새 나가면 다른 기사까지 전부 물려 죽는다.
+        return {"drafted": [],
+                "log": [f"   취재 실패 {it['source']} · 요약 생성 오류"]}
+    return {"drafted": [{**it, "body": body[:BODY_CHARS], **d.model_dump()}]}
 
 
 # ── ④ 검수 ───────────────────────────────────────────────────────────
@@ -229,28 +293,38 @@ class Verdict(BaseModel):
     problems: list[str] = Field(description="근거 없는 부분. 없으면 빈 목록")
 
 
-SYS_CHECK = ("당신은 팩트체커입니다. [요약]을 문장 단위로 쪼개어 각 문장이 [원문]으로 "
-             "뒷받침되는지 하나씩 대조하세요.\n"
+SYS_CHECK = ("당신은 팩트체커입니다. [요약]과 [왜 중요한지]를 문장 단위로 쪼개어 각 문장이 "
+             "[원문]으로 뒷받침되는지 하나씩 대조하세요.\n"
              "특히 수치(CVSS 점수, 피해 건수, 금액 등), 고유명사(조직명, 제품명), "
              "'이미 악용되었다/피해를 입었다'처럼 원문에 없는 새로운 사실 주장이 "
-             "요약에 하나라도 추가되어 있으면 반드시 불합격(ok=false) 처리하세요.\n"
+             "하나라도 추가되어 있으면 반드시 불합격(ok=false) 처리하세요.\n"
+             "[왜 중요한지]는 해석·의견일 수 있으니 '중요하다고 판단한 것' 자체는 "
+             "문제 삼지 마세요 — 다만 그 문장 안에 원문에 없는 새 사실 주장이 있다면 "
+             "그건 [요약]과 똑같이 불합격 사유입니다.\n"
              "번역이나 단위 환산(같은 값을 다른 단위로 표현)은 문제가 아닙니다.")
 
 
 def check(d):
-    user = (f"[원문]\n{d['body'][:5000]}\n\n"
-            f"[헤드라인]\n{d['headline']}\n\n[요약]\n{d['summary']}")
-    return client.chat.completions.parse(
-        model=MODEL, temperature=0,
-        messages=[{"role": "system", "content": SYS_CHECK},
-                  {"role": "user", "content": user}],
-        response_format=Verdict).choices[0].message.parsed
+    user = (f"[원문]\n{d['body'][:BODY_CHARS]}\n\n"
+            f"[헤드라인]\n{d['headline']}\n\n[요약]\n{d['summary']}\n\n"
+            f"[왜 중요한지]\n{d['why']}")
+    try:
+        return client.chat.completions.parse(
+            model=MODEL, temperature=0,
+            messages=[{"role": "system", "content": SYS_CHECK},
+                      {"role": "user", "content": user}],
+            response_format=Verdict).choices[0].message.parsed
+    except Exception:
+        return None
 
 
 def verify(s: dict) -> dict:
     kept, dropped = [], []
     for d in s["drafted"]:
-        (kept if check(d).ok else dropped).append(d)
+        # 판정 호출이 실패하거나 거부돼 v가 None이면 "통과 못 함"과 똑같이 뺀다 —
+        # 검수가 안 됐다는 것과 검수를 통과했다는 것은 다르다.
+        v = check(d)
+        (kept if (v is not None and v.ok) else dropped).append(d)
     return {"verified": kept,
             "log": [f"④ 검수   {len(s['drafted'])} → {len(kept)}건"
                     + (f" · 불합격 {[x['source'] for x in dropped]}" if dropped else "")]}
@@ -287,15 +361,18 @@ def build_embeds(run_id, lead, articles):
 
 
 def send(run_id, lead, articles, webhook=None, dry_run=True):
+    """반환값은 bool이 아니라 "dry-run"/"sent"/"failed" 문자열이다 — 이전에는
+    dry-run이라 안 보낸 것과 진짜로 보냈는데 실패한 것이 둘 다 False라서 로그에서
+    구분이 안 됐다(동료 리뷰 2026-09-16)."""
     payload = {"username": "MJ K", "embeds": build_embeds(run_id, lead, articles)}
     if dry_run or not webhook:
         print(f"[dry-run] embed {len(payload['embeds'])}개 · "
               f"{len(json.dumps(payload, ensure_ascii=False))}자 — 보내지 않음")
-        return False
+        return "dry-run"
     r = requests.post(webhook, json=payload, timeout=20)
     ok = r.status_code in (200, 204)
     print("발행:", "성공" if ok else f"실패 {r.status_code} {r.text[:120]}")
-    return ok
+    return "sent" if ok else "failed"
 
 
 def make_lead(arts):
@@ -313,41 +390,56 @@ def _build_articles(s: dict) -> list:
              "when": a["at"].strftime("%m-%d %H:%M")} for a in s["verified"]]
 
 
+_STATUS_KR = {"dry-run": "dry-run", "sent": "보냄", "failed": "실패"}
+
+
 def publish(s: dict) -> dict:
     """발행 ⑤-A: Discord"""
     arts = _build_articles(s)
     today = datetime.now().strftime("%Y-%m-%d")
-    sent = send(today, make_lead(arts), arts,
-                webhook=os.environ.get("DISCORD_WEBHOOK_URL"),
-                dry_run=os.environ.get("DRY_RUN", "1") == "1")
+    status = send(today, make_lead(arts), arts,
+                  webhook=os.environ.get("DISCORD_WEBHOOK_URL"),
+                  dry_run=os.environ.get("DRY_RUN", "1") == "1")
     label = f"{len(arts)}건" if arts else "조용합니다"
-    return {"log": [f"⑤ 발행(Discord)   {label} · {'보냄' if sent else 'dry-run'}"]}
+    return {"sent_status": status,
+            "log": [f"⑤ 발행(Discord)   {label} · {_STATUS_KR[status]}"]}
 
 
 # ── ⑤-B 발행: 이메일 (다른 매체로도 발행 가능함을 보여주는 대안 경로) ─────
 def build_email_html(run_id, lead, articles):
-    """Discord의 build_embeds()와 정확히 대응하는 이메일용 HTML 버전."""
+    """Discord의 build_embeds()와 정확히 대응하는 이메일용 HTML 버전.
+    기사 제목·URL은 외부(RSS) 기사에서 그대로 온 문자열이라 <script>나 따옴표가
+    섞여 들어올 수 있다 — 보안 뉴스레터라 이런 제목이 실제로 나올 수 있으므로
+    html.escape()로 이스케이프한다(동료 리뷰 2026-09-16)."""
     if not articles:
-        return f"<h2>🗞️ {run_id}</h2><p>오늘은 조용합니다.</p>"
-    parts = [f"<h2>🗞️ {run_id} · {BRIEF_NAME}</h2>", f"<p>{lead}</p>", "<hr>"]
+        return f"<h2>🗞️ {html.escape(run_id)}</h2><p>오늘은 조용합니다.</p>"
+    parts = [f"<h2>🗞️ {html.escape(run_id)} · {html.escape(BRIEF_NAME)}</h2>",
+              f"<p>{html.escape(lead)}</p>", "<hr>"]
     for i, a in enumerate(articles, 1):
+        url = html.escape(a["url"], quote=True)
+        headline = html.escape(a["headline"])
+        summary = html.escape(a["summary"])
+        why = html.escape(a["why"]) if a.get("why") else ""
+        source = html.escape(a["source"])
+        when = html.escape(a["when"])
         parts.append(
-            f"<h3>{i}. <a href='{a['url']}'>{a['headline']}</a></h3>"
-            f"<p>{a['summary']}</p>"
-            + (f"<p>💡 <b>{a['why']}</b></p>" if a.get("why") else "")
-            + f"<p style='color:#888;font-size:12px'>{a['source']} · {a['when']}</p>"
+            f"<h3>{i}. <a href='{url}'>{headline}</a></h3>"
+            f"<p>{summary}</p>"
+            + (f"<p>💡 <b>{why}</b></p>" if why else "")
+            + f"<p style='color:#888;font-size:12px'>{source} · {when}</p>"
             "<hr>"
         )
     return "\n".join(parts)
 
 
 def send_email(subject, html_body, dry_run=True):
-    """SMTP로 이메일을 보낸다. 사내 SMTP 릴레이도 host/port만 바꾸면 그대로 쓸 수 있다."""
+    """SMTP로 이메일을 보낸다. 사내 SMTP 릴레이도 host/port만 바꾸면 그대로 쓸 수 있다.
+    send()와 마찬가지로 "dry-run"/"sent"/"failed" 문자열을 돌려준다."""
     to_addr = os.environ.get("MAIL_TO", "")
     if dry_run or not to_addr:
         print(f"[dry-run] 이메일 · 제목='{subject}' · 수신자='{to_addr or '(미설정)'}' "
               f"· 본문 {len(html_body)}자 — 보내지 않음")
-        return False
+        return "dry-run"
 
     import smtplib
     from email.mime.multipart import MIMEMultipart
@@ -369,10 +461,10 @@ def send_email(subject, html_body, dry_run=True):
             server.login(user, pw)
             server.sendmail(user, [to_addr], msg.as_string())
         print("발행(이메일): 성공")
-        return True
+        return "sent"
     except Exception as e:
         print(f"발행(이메일): 실패 {type(e).__name__}: {e}")
-        return False
+        return "failed"
 
 
 def publish_email(s: dict) -> dict:
@@ -381,10 +473,11 @@ def publish_email(s: dict) -> dict:
     arts = _build_articles(s)
     today = datetime.now().strftime("%Y-%m-%d")
     subject = f"[{BRIEF_NAME}] {today} — {len(arts)}건" if arts else f"[{BRIEF_NAME}] {today} — 오늘은 조용합니다"
-    html = build_email_html(today, make_lead(arts), arts)
-    sent = send_email(subject, html, dry_run=os.environ.get("DRY_RUN", "1") == "1")
+    body_html = build_email_html(today, make_lead(arts), arts)
+    status = send_email(subject, body_html, dry_run=os.environ.get("DRY_RUN", "1") == "1")
     label = f"{len(arts)}건" if arts else "조용합니다"
-    return {"log": [f"⑤ 발행(이메일)   {label} · {'보냄' if sent else 'dry-run'}"]}
+    return {"sent_status": status,
+            "log": [f"⑤ 발행(이메일)   {label} · {_STATUS_KR[status]}"]}
 
 
 # ── 그래프 조립 ──────────────────────────────────────────────────────
@@ -409,20 +502,22 @@ def build():
 
 
 INIT = {"hours": 24,
-        "collected": [], "picked": [], "drafted": [], "verified": [], "log": []}
+        "collected": [], "picked": [], "drafted": [], "verified": [],
+        "sent_status": "", "log": []}
 
 
 # ── 실행 + 지표 기록 ─────────────────────────────────────────────────
 def run():
     out = build().compile().invoke(INIT)
-    row = {"run_id":    datetime.now().strftime("%Y-%m-%d %H:%M"),
-           "collected": len(out["collected"]),
-           "picked":    len(out["picked"]),
-           "drafted":   len(out["drafted"]),
-           "published": len(out["verified"]),
-           "hours":     out["hours"],
-           "by_source": {},
-           "log":       out["log"]}
+    row = {"run_id":      datetime.now().strftime("%Y-%m-%d %H:%M"),
+           "collected":   len(out["collected"]),
+           "picked":      len(out["picked"]),
+           "drafted":     len(out["drafted"]),
+           "published":   len(out["verified"]),  # 검수 통과 건수 — 실제 발송 여부는 send_status 참고
+           "send_status": out["sent_status"],
+           "hours":       out["hours"],
+           "by_source":   {},
+           "log":         out["log"]}
     for a in out["verified"]:
         row["by_source"][a["source"]] = row["by_source"].get(a["source"], 0) + 1
     path = pathlib.Path(f"store/metrics_{_CFG_PATH.stem}.jsonl")

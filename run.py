@@ -13,3 +13,7 @@ if __name__ == "__main__":
     out = run()
     for line in out["log"]:
         print(line)                    # 이 출력이 Actions 로그에 그대로 남는다
+    # 발송이 진짜로 실패했으면(dry-run이 아니라 웹훅/SMTP 응답이 실패) 종료 코드도
+    # 실패로 남겨야 Actions가 초록불로 끝나지 않는다 (동료 리뷰 2026-09-16).
+    if out["sent_status"] == "failed":
+        sys.exit(1)
